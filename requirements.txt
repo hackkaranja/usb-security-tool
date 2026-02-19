@@ -1,0 +1,7 @@
+eel
+yara-python
+bcrypt
+pywin32
+wmi
+plyer
+pywebview
