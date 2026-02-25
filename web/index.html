@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -11,7 +11,8 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700&display=swap">
   <link rel="stylesheet" href="styles/main.css">
-  <link rel="icon" href="favicon.ico">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
 </head>
 
 <body>
@@ -136,22 +137,69 @@
       <div id="tab-logs" class="tab-content hidden">
         <div class="section">
           <h2><i class="fas fa-history"></i> System Logs</h2>
+          <p class="logs-description">
+        
+          </p>
+          <div class="logs-filters">
+            <label>
+              Date From
+              <input type="date" id="logDateFrom">
+            </label>
+            <label>
+              Date To
+              <input type="date" id="logDateTo">
+            </label>
+            <label>
+              Severity
+              <select id="logSeverityFilter">
+                <option value="">All</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+                <option value="info">Info</option>
+              </select>
+            </label>
+            <label>
+              USB Device
+              <select id="logDeviceFilter">
+                <option value="">All</option>
+              </select>
+            </label>
+          </div>
           <button id="refreshLogsBtn" class="btn btn-secondary" onclick="refreshLogs()"><i class="fas fa-sync-alt"></i> Refresh</button>
           <div class="table-container">
             <table id="logTable">
               <thead>
-                <tr><th>Time</th><th>Type</th><th>Details</th></tr>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Severity</th>
+                  <th>USB Device</th>
+                  <th>Filename</th>
+                  <th>Threat Signature</th>
+                  <th>Action Taken</th>
+                </tr>
               </thead>
-              <tbody><tr><td colspan="3" class="empty-state">Loading logs...</td></tr></tbody>
+              <tbody><tr><td colspan="6" class="empty-state">Loading logs...</td></tr></tbody>
             </table>
           </div>
         </div>
       </div>
 
-      <!-- Quarantine Tab -->
+            <!-- Quarantine Tab -->
       <div id="tab-quarantine" class="tab-content hidden">
         <div class="section">
           <h2><i class="fas fa-folder-minus"></i> Quarantine</h2>
+          <div class="logs-filters">
+            <label>
+              Date From
+              <input type="date" id="quarantineDateFrom">
+            </label>
+            <label>
+              Date To
+              <input type="date" id="quarantineDateTo">
+            </label>
+          </div>
           <div class="button-group">
             <button class="btn btn-secondary" onclick="refreshQuarantine()"><i class="fas fa-sync-alt"></i> Refresh</button>
             <button class="btn btn-danger" onclick="clearQuarantine()"><i class="fas fa-trash-alt"></i> Clear All</button>
@@ -218,3 +266,5 @@
   <script src="scripts/settings.js"></script>
 </body>
 </html>
+
+

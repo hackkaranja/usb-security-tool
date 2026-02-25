@@ -1,4 +1,4 @@
-// =========================
+﻿// =========================
 //  GLOBAL STATE
 // =========================
 let isAdminAuthenticated = false;
@@ -6,6 +6,18 @@ let eelReady = false;
 let liveLogRefreshInterval = null;
 let lastLogId = 0;
 let refreshInFlight = false;
+let allLogs = [];
+let allQuarantineItems = [];
+let activeLogFilters = {
+  dateFrom: "",
+  dateTo: "",
+  severity: "",
+  device: ""
+};
+let activeQuarantineFilters = {
+  dateFrom: "",
+  dateTo: ""
+};
 
 // Initialize on page load
 document.addEventListener("DOMContentLoaded", () => {
@@ -13,6 +25,8 @@ document.addEventListener("DOMContentLoaded", () => {
   setupAutoRefresh();
   setupLoginOverlay();
   setupLogRefreshButton();
+  setupLogFilters();
+  setupQuarantineFilters();
 });
 
 // Wait for EEL backend
@@ -44,38 +58,13 @@ function ensureEelReady(timeoutMs = 4000) {
 
 // Real-time log callback from backend
 function addNewLog(logEntry) {
+  const normalized = normalizeLogEntry(logEntry);
+  allLogs.unshift(normalized);
+  if (allLogs.length > 500) allLogs = allLogs.slice(0, 500);
+  updateFilterOptionsFromLogs(allLogs);
+
   if (!document.getElementById("tab-logs").classList.contains("hidden")) {
-    const tbody = document.querySelector("#logTable tbody");
-    if (!tbody) return;
-
-    // Remove loading/empty state if present
-    const emptyRow = tbody.querySelector(".empty-state");
-    if (emptyRow) emptyRow.parentElement.remove();
-
-    // Add new log row
-    const row = document.createElement("tr");
-    row.className = "log-row new-log";
-    row.innerHTML = `
-      <td>${escapeHtml(logEntry.timestamp || new Date().toLocaleTimeString())}</td>
-      <td><span class="log-type log-${(logEntry.type || "info").toLowerCase()}">${escapeHtml(logEntry.type || "INFO")}</span></td>
-      <td>${escapeHtml(logEntry.details || "")}</td>`;
-    tbody.insertBefore(row, tbody.firstChild);
-
-    // Keep only last 500 logs
-    while (tbody.children.length > 500) {
-      tbody.removeChild(tbody.lastChild);
-    }
-
-    // Animate new row
-    row.style.animation = "slideDown 0.3s ease";
-
-    // Auto-scroll if at bottom
-    const container = document.querySelector("#tab-logs .table-container");
-    if (container && container.scrollTop + container.clientHeight >= container.scrollHeight - 50) {
-      setTimeout(() => {
-        container.scrollTop = container.scrollHeight;
-      }, 100);
-    }
+    applyLogFiltersAndRender(true);
   }
 }
 
@@ -210,13 +199,13 @@ async function refreshAll() {
     // Update USB message
     let msg, cls;
     if (s.scanning) {
-      msg = "Scanning USB…";
+      msg = "Scanning USBâ€¦";
       cls = "usb-message scanning";
     } else if (s.threats_found > 0) {
-      msg = `⚠ Threats found (${s.threats_found})`;
+      msg = `âš  Threats found (${s.threats_found})`;
       cls = "usb-message threat";
     } else if (s.files_scanned > 0) {
-      msg = "✓ USB is clean";
+      msg = "âœ“ USB is clean";
       cls = "usb-message clean";
     } else {
       msg = "No USB detected";
@@ -321,29 +310,12 @@ async function refreshLogs(isManual = false) {
     if (!ready) return;
     
     const logs = await eel.get_logs(500)();
-    const tbody = document.querySelector("#logTable tbody");
-    if (!tbody) return;
-    
-    tbody.innerHTML = "";
-
-    if (!logs || logs.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="3" class="empty-state">No logs</td></tr>`;
-      lastLogId = 0;
-      return;
-    }
-
-    // Backend already returns newest first.
-    logs.forEach(l => {
-      const row = document.createElement("tr");
-      row.innerHTML = `
-        <td>${escapeHtml(l.timestamp || "N/A")}</td>
-        <td><span class="log-type log-${(l.type || "info").toLowerCase()}">${escapeHtml(l.type || "N/A")}</span></td>
-        <td>${escapeHtml(l.details || "N/A")}</td>`;
-      tbody.appendChild(row);
-    });
+    allLogs = (logs || []).map(normalizeLogEntry);
+    updateFilterOptionsFromLogs(allLogs);
+    applyLogFiltersAndRender(false);
 
     // Track highest ID for incremental polling.
-    const maxId = Math.max(...logs.map(l => Number(l.id) || 0));
+    const maxId = logs && logs.length ? Math.max(...logs.map(l => Number(l.id) || 0)) : 0;
     lastLogId = maxId;
     if (isManual) {
       const btn = document.getElementById("refreshLogsBtn");
@@ -357,6 +329,155 @@ async function refreshLogs(isManual = false) {
   } finally {
     refreshInFlight = false;
   }
+}
+
+function setupLogFilters() {
+  const ids = ["logDateFrom", "logDateTo", "logSeverityFilter", "logDeviceFilter"];
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", () => {
+      activeLogFilters = collectLogFilters();
+      applyLogFiltersAndRender(false);
+    });
+  });
+}
+
+function collectLogFilters() {
+  return {
+    dateFrom: document.getElementById("logDateFrom")?.value || "",
+    dateTo: document.getElementById("logDateTo")?.value || "",
+    severity: document.getElementById("logSeverityFilter")?.value || "",
+    device: document.getElementById("logDeviceFilter")?.value || ""
+  };
+}
+
+function updateFilterOptionsFromLogs(logs) {
+  const deviceSelect = document.getElementById("logDeviceFilter");
+  if (!deviceSelect) return;
+
+  const selectedDevice = deviceSelect.value;
+  const deviceOptions = [...new Set(logs.map(l => l.device).filter(Boolean))].sort();
+
+  deviceSelect.innerHTML = `<option value="">All</option>${deviceOptions.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join("")}`;
+
+  if (deviceOptions.includes(selectedDevice)) deviceSelect.value = selectedDevice;
+  activeLogFilters = collectLogFilters();
+}
+
+function applyLogFiltersAndRender(markNewRows = false) {
+  const f = activeLogFilters;
+  const filtered = allLogs.filter(log => {
+    const logDate = parseLogTimestamp(log.timestamp);
+    const fromOk = !f.dateFrom || (logDate && logDate >= new Date(`${f.dateFrom}T00:00:00`));
+    const toOk = !f.dateTo || (logDate && logDate <= new Date(`${f.dateTo}T23:59:59`));
+    const sevOk = !f.severity || log.severity === f.severity;
+    const devOk = !f.device || log.device === f.device;
+    return fromOk && toOk && sevOk && devOk;
+  });
+
+  renderLogs(filtered, markNewRows);
+}
+
+function renderLogs(logs, markNewRows = false) {
+  const tbody = document.querySelector("#logTable tbody");
+  if (!tbody) return;
+
+  tbody.innerHTML = "";
+  if (!logs || logs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="empty-state">No logs match the selected filters</td></tr>`;
+    return;
+  }
+
+  logs.forEach((log, idx) => {
+    const row = document.createElement("tr");
+    if (markNewRows && idx === 0) row.className = "new-log";
+    row.innerHTML = `
+      <td>${escapeHtml(log.timestamp || "N/A")}</td>
+      <td><span class="log-severity severity-${escapeHtml(log.severity || "info")}">${escapeHtml(log.severity || "info")}</span></td>
+      <td>${escapeHtml(log.device || "Unknown")}</td>
+      <td>${escapeHtml(log.filename || "N/A")}</td>
+      <td>${escapeHtml(log.signature || "N/A")}</td>
+      <td>${escapeHtml(log.action || "Logged")}</td>`;
+    tbody.appendChild(row);
+  });
+}
+
+function normalizeLogEntry(log) {
+  const details = String(log?.details || "");
+  const type = String(log?.type || "INFO");
+  const rawTimestamp = String(log?.timestamp || "").trim();
+  const timestamp = /^\d{2}:\d{2}:\d{2}$/.test(rawTimestamp)
+    ? `${new Date().toISOString().slice(0, 10)} ${rawTimestamp}`
+    : (rawTimestamp || new Date().toISOString());
+  const filename = extractField(details, [
+    /in\s+([A-Za-z0-9_.\\/-]+\.[A-Za-z0-9]+)/i,
+    /file[:=\s]+([A-Za-z0-9_.\\/-]+\.[A-Za-z0-9]+)/i
+  ]);
+  const device = extractField(details, [
+    /\b([A-Z]:\\?)/i,
+    /drive[:=\s]+([A-Za-z0-9_:\\/-]+)/i,
+    /device[:=\s]+([A-Za-z0-9_:\\/-]+)/i
+  ]);
+  const signature = extractField(details, [
+    /signature[:=\s]+([A-Za-z0-9_.-]+)/i,
+    /threat[:=\s]+([A-Za-z0-9_.-]+)/i
+  ]) || (type === "THREAT" ? "Suspicious content" : "");
+
+  return {
+    id: log?.id || 0,
+    timestamp,
+    type,
+    details,
+    filename,
+    device,
+    signature,
+    severity: deriveSeverity(type, details),
+    action: deriveAction(type, details)
+  };
+}
+
+function extractField(text, patterns) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) return match[1].trim();
+  }
+  return "";
+}
+
+function parseLogTimestamp(timestamp) {
+  const value = String(timestamp || "").trim();
+  if (!value) return null;
+
+  // Handles "YYYY-MM-DD HH:mm:ss" and "YYYY-MM-DDTHH:mm:ss(.sss)"
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (m) {
+    const [, y, mo, d, h, mi, s = "00"] = m;
+    return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function deriveSeverity(type, details) {
+  const t = `${type} ${details}`.toLowerCase();
+  if (t.includes("critical") || t.includes("malware")) return "critical";
+  if (type === "THREAT" || t.includes("threat") || t.includes("error")) return "high";
+  if (t.includes("warning") || t.includes("quarantine")) return "medium";
+  if (type === "SCAN" || type === "CONFIG") return "low";
+  return "info";
+}
+
+function deriveAction(type, details) {
+  const text = `${type} ${details}`.toLowerCase();
+  if (text.includes("quarantine")) return "Quarantined";
+  if (text.includes("deleted")) return "Deleted";
+  if (text.includes("restored")) return "Restored";
+  if (text.includes("blocked")) return "Blocked";
+  if (type === "THREAT") return "Flagged";
+  if (type === "SCAN") return "Scanned";
+  return "Logged";
 }
 
 function startLiveLogRefresh() {
@@ -383,32 +504,68 @@ function stopLiveLogRefresh() {
   if (liveLogRefreshInterval) clearInterval(liveLogRefreshInterval);
 }
 
+function setupQuarantineFilters() {
+  const ids = ["quarantineDateFrom", "quarantineDateTo"];
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", () => {
+      activeQuarantineFilters = collectQuarantineFilters();
+      renderQuarantineTable();
+    });
+  });
+}
+
+function collectQuarantineFilters() {
+  return {
+    dateFrom: document.getElementById("quarantineDateFrom")?.value || "",
+    dateTo: document.getElementById("quarantineDateTo")?.value || ""
+  };
+}
+
+function renderQuarantineTable() {
+  const tbody = document.querySelector("#quarantineTable tbody");
+  if (!tbody) return;
+
+  const filters = activeQuarantineFilters;
+  const filtered = allQuarantineItems.filter(item => {
+    const itemDate = parseLogTimestamp(item.quarantined_at);
+    const fromOk = !filters.dateFrom || (itemDate && itemDate >= new Date(`${filters.dateFrom}T00:00:00`));
+    const toOk = !filters.dateTo || (itemDate && itemDate <= new Date(`${filters.dateTo}T23:59:59`));
+    return fromOk && toOk;
+  });
+
+  tbody.innerHTML = "";
+
+  if (!filtered || filtered.length === 0) {
+    const message = allQuarantineItems.length
+      ? "No quarantined files match the selected date range"
+      : "No quarantined files";
+    tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${message}</td></tr>`;
+    return;
+  }
+
+  filtered.forEach(i => {
+    tbody.innerHTML += `
+      <tr>
+        <td>${escapeHtml(i.quarantined_at || "N/A")}</td>
+        <td>${escapeHtml(i.original_path || "N/A")}</td>
+        <td>${escapeHtml(i.reason || "N/A")}</td>
+        <td class="actions">
+          <button onclick="restoreItem('${escapeHtml(i.filename)}')" class="btn-small">Restore</button>
+          <button onclick="deleteItem('${escapeHtml(i.filename)}')" class="btn-small">Delete</button>
+        </td>
+      </tr>`;
+  });
+}
+
 // Quarantine functions
 async function refreshQuarantine() {
   try {
     const list = await eel.get_quarantine_list()();
-    const tbody = document.querySelector("#quarantineTable tbody");
-    if (!tbody) return;
-    
-    tbody.innerHTML = "";
-
-    if (!list || list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="4" class="empty-state">No quarantined files</td></tr>`;
-      return;
-    }
-
-    list.forEach(i => {
-      tbody.innerHTML += `
-        <tr>
-          <td>${escapeHtml(i.quarantined_at || "N/A")}</td>
-          <td>${escapeHtml(i.original_path || "N/A")}</td>
-          <td>${escapeHtml(i.reason || "N/A")}</td>
-          <td class="actions">
-            <button onclick="restoreItem('${escapeHtml(i.filename)}')" class="btn-small">Restore</button>
-            <button onclick="deleteItem('${escapeHtml(i.filename)}')" class="btn-small">Delete</button>
-          </td>
-        </tr>`;
-    });
+    allQuarantineItems = list || [];
+    activeQuarantineFilters = collectQuarantineFilters();
+    renderQuarantineTable();
   } catch (e) {
     console.error("refreshQuarantine failed:", e);
   }
@@ -590,3 +747,4 @@ function notifyFrontend(title, message, level = "info") {
     console.error("notifyFrontend error:", e);
   }
 }
+

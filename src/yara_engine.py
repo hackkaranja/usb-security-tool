@@ -21,6 +21,7 @@ loaded_rule_count = 0
 MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
 EXCLUDED_FOLDERS = {".git", "__pycache__", "node_modules", "$RECYCLE.BIN", "System Volume Information"}
 EXCLUDED_EXTENSIONS = {".lnk", ".url", ".tmp", ".bak"}
+ENCRYPTED_EXTENSIONS = {".enc", ".encrypted", ".aes", ".gpg", ".pgp", ".p7m", ".p7e"}
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
 
 
@@ -175,6 +176,13 @@ def should_scan_file(file_path: Path) -> bool:
     return True
 
 
+
+def _is_encrypted_file(file_path: Path) -> bool:
+    """
+    Return True for files that are explicitly marked as encrypted via extension.
+    This enforces a quarantine policy independent of YARA matches.
+    """
+    return file_path.suffix.lower() in ENCRYPTED_EXTENSIONS
 def scan_drive(drive_letter: str):
     """
     Scan all files on the removable drive using loaded YARA rules.
@@ -220,13 +228,15 @@ def scan_drive(drive_letter: str):
         progress_tracker.update(rel_path, scanned_count)
 
         try:
+            reasons = []
+            file_severity = "low"
+
+            if _is_encrypted_file(file_path):
+                reasons.append("Encrypted file policy [HIGH]")
+                file_severity = "high"
+
             matches = rules.match(str(file_path))
             if matches:
-                found_threats += 1
-                progress_tracker.add_threat()
-
-                reasons = []
-                file_severity = "low"
                 for match in matches:
                     matched_strings = _extract_match_strings(match)
                     match_severity = _normalize_severity(getattr(match, "meta", {}).get("severity"))
@@ -237,6 +247,10 @@ def scan_drive(drive_letter: str):
                     if matched_strings:
                         reason += f" - {matched_strings}"
                     reasons.append(reason)
+
+            if reasons:
+                found_threats += 1
+                progress_tracker.add_threat()
 
                 reason_str = "; ".join(reasons)
                 quarantined_path = quarantine_file(file_path, reason_str)
@@ -275,3 +289,4 @@ def scan_drive(drive_letter: str):
         log_event("NOTIFY_ERROR", f"Failed to send scan-completion notification: {ne}")
 
     progress_tracker.finish()
+
