@@ -22,12 +22,14 @@ class ScanProgress:
             self.percentage = 0.0
             self.threats_found = 0  # reset on new scan
 
-    def update(self, current_file: str, scanned_count: int):
+    def update(self, current_file: str, scanned_count: int, total: int | None = None):
         with self.lock:
             if not self.active:
                 return
             self.current_file = current_file
             self.files_scanned = scanned_count
+            if total is not None:
+                self.total_files = max(int(total), 0)
             if self.total_files > 0:
                 self.percentage = (scanned_count / self.total_files) * 100
             else:

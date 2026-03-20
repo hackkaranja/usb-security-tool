@@ -1,0 +1,312 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>USB Security Guard</title>
+  <style>
+    /* Prevent white flash before main stylesheet loads */
+    html, body {
+      background: #0b1411;
+      color: #dbffe9;
+      margin: 0;
+    }
+    #boot-splash {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0b1411;
+      color: #9edbb9;
+      font-family: "Montserrat", sans-serif;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      z-index: 9999;
+      transition: opacity 180ms ease;
+    }
+    body.app-ready #boot-splash {
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+
+  <script src="scripts/bridge.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700&display=swap">
+  <link rel="stylesheet" href="styles/main.css">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+</head>
+
+<body>
+  <div id="boot-splash">Starting USB Security Guard...</div>
+  <!-- Login Overlay -->
+  <div id="login-overlay" class="overlay hidden">
+    <div id="login-box" class="login-box">
+      <h2><i class="fas fa-user-shield"></i> Admin Login</h2>
+      <input id="username" type="text" placeholder="Username" value="admin">
+      <input id="password" type="password" placeholder="Password">
+      <button class="btn btn-primary" type="button" onclick="login()"><i class="fas fa-sign-in-alt"></i> Login</button>
+      <div id="login-error" class="error-message"></div>
+      <button class="btn btn-secondary" type="button" onclick="hideLogin()"><i class="fas fa-times"></i> Cancel</button>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <header>
+    <h1><i class="fas fa-shield-alt"></i> USB Security Guard</h1>
+    <div class="header-clock" aria-live="polite">
+      <div id="clockTime" class="clock-time">--:--:--</div>
+      <div id="clockDate" class="clock-date">----</div>
+    </div>
+    <div class="header-buttons">
+      <button id="theme-toggle-btn" class="btn btn-secondary theme-toggle-btn" type="button"><i class="fas fa-sun"></i> Light Mode</button>
+      <button id="admin-panel-btn" class="btn btn-secondary" type="button" onclick="showLogin()"><i class="fas fa-user-shield"></i> Admin Panel</button>
+      <button id="back-to-main" class="btn btn-secondary hidden" type="button" onclick="backToMain()"><i class="fas fa-arrow-left"></i> Back</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Admin Tabs -->
+    <div id="admin-tabs" class="admin-tabs hidden">
+      <div class="tabs">
+        <button class="tab active" data-tab="dashboard"><i class="fas fa-tachometer-alt"></i> Dashboard</button>
+        <button class="tab" data-tab="logs"><i class="fas fa-history"></i> Logs</button>
+        <button class="tab" data-tab="quarantine"><i class="fas fa-folder-minus"></i> Quarantine</button>
+        <button class="tab" data-tab="settings"><i class="fas fa-cog"></i> Settings</button>
+      </div>
+    </div>
+
+    <!-- User View -->
+    <div id="user-view">
+      <div class="section">
+        <h2><i class="fas fa-shield-alt"></i> Protection Status</h2>
+        <p>Real-time monitoring of USB devices for threats.</p>
+      </div>
+
+      <div class="section">
+        <h2><i class="fas fa-search"></i> Current Scan</h2>
+        <div id="scanStatus">No scan in progress</div>
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <div id="progressText">0 / 0 files (0%)</div>
+        <div id="currentFile" class="current-file"></div>
+        <div class="button-group scan-actions">
+          <button id="ejectUsbBtn" class="btn btn-secondary" type="button" onclick="ejectUsb()"><i class="fas fa-eject"></i> Eject USB</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2><i class="fas fa-usb-drive"></i> USB Status</h2>
+        <div id="usbMessage" class="usb-message">No USB device detected</div>
+      </div>
+    </div>
+
+    <!-- Admin Dashboard -->
+    <div id="admin-dashboard" class="hidden">
+      <!-- Dashboard Tab -->
+      <div id="tab-dashboard" class="tab-content">
+        <div class="section">
+          <h2><i class="fas fa-tachometer-alt"></i> Admin Dashboard</h2>
+          
+          <!-- USB Devices Status -->
+          <div class="usb-devices-grid">
+            <div class="device-card">
+              <div class="device-icon scanning">
+                <i class="fas fa-magnifying-glass"></i>
+              </div>
+              <div class="device-info">
+                <div class="device-label">Currently Scanning</div>
+                <div class="device-count" id="scanningDevices">0</div>
+              </div>
+            </div>
+            
+            <div class="device-card">
+              <div class="device-icon threat">
+                <i class="fas fa-exclamation-triangle"></i>
+              </div>
+              <div class="device-info">
+                <div class="device-label">Threats Found</div>
+                <div class="device-count" id="threatsFound">0</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="scan-details">
+            <h3>Current Scan Progress</h3>
+            <div id="scanStatusAdmin">No scan in progress</div>
+            <div class="progress-bar">
+              <div id="progressFillAdmin" class="progress-fill"></div>
+            </div>
+            <div id="progressTextAdmin">0 / 0 files (0%)</div>
+            <div id="currentFileAdmin" class="current-file"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logs Tab -->
+      <div id="tab-logs" class="tab-content hidden">
+        <div class="section">
+          <h2><i class="fas fa-history"></i> System Logs</h2>
+          <p class="logs-description">
+        
+          </p>
+          <div class="logs-filters">
+            <label>
+              Date From
+              <input type="date" id="logDateFrom">
+            </label>
+            <label>
+              Date To
+              <input type="date" id="logDateTo">
+            </label>
+            <label>
+              Severity
+              <select id="logSeverityFilter">
+                <option value="">All</option>
+                <option value="critical">Critical</option>
+                <option value="low">Low</option>
+                <option value="info">Info</option>
+              </select>
+            </label>
+            <label>
+              USB Device
+              <select id="logDeviceFilter">
+                <option value="">All</option>
+              </select>
+            </label>
+          </div>
+          <div class="button-group">
+            <button id="refreshLogsBtn" class="btn btn-secondary" type="button"><i class="fas fa-sync-alt"></i> Refresh</button>
+            <button id="clearLogsBtn" class="btn btn-danger" type="button"><i class="fas fa-trash-alt"></i> Clear All Logs</button>
+          </div>
+          <div class="table-container">
+            <table id="logTable">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Severity</th>
+                  <th>Event Type</th>
+                  <th>Session ID</th>
+                </tr>
+              </thead>
+              <tbody><tr><td colspan="4" class="empty-state">Loading logs...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+            <!-- Quarantine Tab -->
+      <div id="tab-quarantine" class="tab-content hidden">
+        <div class="section">
+          <h2><i class="fas fa-folder-minus"></i> Quarantine</h2>
+          <div class="logs-filters">
+            <label>
+              Date From
+              <input type="date" id="quarantineDateFrom">
+            </label>
+            <label>
+              Date To
+              <input type="date" id="quarantineDateTo">
+            </label>
+          </div>
+          <div class="button-group">
+            <button id="refreshQuarantineBtn" class="btn btn-secondary" type="button"><i class="fas fa-sync-alt"></i> Refresh</button>
+            <button class="btn btn-danger" type="button" onclick="clearQuarantine()"><i class="fas fa-trash-alt"></i> Clear All</button>
+          </div>
+          <div class="table-container">
+            <table id="quarantineTable">
+              <thead>
+                <tr><th>Date</th><th>Path</th><th>Type</th><th>Actions</th></tr>
+              </thead>
+              <tbody><tr><td colspan="4" class="empty-state">Loading quarantine...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings Tab -->
+      <div id="tab-settings" class="tab-content hidden">
+        <div class="section">
+          <h2><i class="fas fa-cog"></i> Settings</h2>
+
+          <div class="settings-group">
+            <h3><i class="fas fa-sliders-h"></i> General Settings</h3>
+            <label class="setting-item">
+              <input type="checkbox" id="autoScanToggle">
+              <span class="setting-label">
+                <strong>Auto Scan USB</strong>
+                <small>Automatically scan when USB is inserted</small>
+              </span>
+            </label>
+            <label class="setting-item">
+              <input type="checkbox" id="yaraToggle">
+              <span class="setting-label">
+                <strong>Enable YARA Rules</strong>
+                <small>Advanced malware detection</small>
+              </span>
+            </label>
+            <button class="btn btn-primary" type="button" onclick="saveSettings()"><i class="fas fa-save"></i> Save</button>
+            <p id="settingsStatus" class="status-message"></p>
+          </div>
+
+          <div class="settings-group">
+            <h3><i class="fas fa-code-branch"></i> YARA Rules</h3>
+            <button class="btn btn-primary" id="yaraUpdateBtn" type="button" onclick="updateYaraRules()"><i class="fas fa-download"></i> Update Rules</button>
+            <div id="yaraProgress" class="hidden">
+              <div class="progress-bar"><div id="yaraProgressFill" class="progress-fill"></div></div>
+              <div id="yaraProgressText" class="progress-text"></div>
+            </div>
+            <p id="yaraStatus" class="status-message"></p>
+          </div>
+
+          <div class="settings-group yara-rule-panel">
+            <h3><i class="fas fa-file-circle-plus"></i> Add YARA Rule</h3>
+            <label class="setting-item">
+              <span class="setting-label">
+                <strong>Rule Filename</strong>
+                <small>Use .yar or .yara (extension optional)</small>
+              </span>
+              <input type="text" id="newRuleName" placeholder="example_rule.yar">
+            </label>
+            <label class="setting-item">
+              <span class="setting-label">
+                <strong>Rule Content</strong>
+                <small>Paste a valid YARA rule</small>
+              </span>
+              <textarea id="newRuleContent" rows="10" placeholder="rule example { condition: true }"></textarea>
+            </label>
+            <label class="setting-item">
+              <input type="checkbox" id="overwriteRuleToggle">
+              <span class="setting-label">
+                <strong>Overwrite if exists</strong>
+                <small>Replace existing file with same name</small>
+              </span>
+            </label>
+            <button class="btn btn-primary" type="button" onclick="addYaraRule()"><i class="fas fa-plus"></i> Add Rule</button>
+            <p id="newRuleStatus" class="status-message"></p>
+          </div>
+
+          <div class="settings-group">
+            <h3><i class="fas fa-key"></i> Admin Password</h3>
+            <input type="password" id="newPassword" placeholder="New Password">
+            <input type="password" id="confirmPassword" placeholder="Confirm Password">
+            <button class="btn btn-primary" type="button" onclick="changePassword()"><i class="fas fa-key"></i> Update</button>
+            <p id="passwordStatus" class="status-message"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="scripts/app.js"></script>
+  <script src="scripts/settings.js"></script>
+</body>
+</html>
+
+
+

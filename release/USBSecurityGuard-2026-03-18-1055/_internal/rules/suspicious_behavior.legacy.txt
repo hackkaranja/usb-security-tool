@@ -1,0 +1,76 @@
+rule Suspicious_Script_Commands
+{
+    meta:
+        description = "Detects suspicious script execution"
+        author = "USB Security Guard"
+        date = "2024"
+    strings:
+        $script1 = "powershell" nocase ascii wide
+        $script2 = "cmd /c" nocase ascii wide
+        $script3 = "bash -i" nocase ascii wide
+        $script4 = "python -m" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule Persistence_Mechanisms
+{
+    meta:
+        description = "Detects persistence installation methods"
+        author = "USB Security Guard"
+        date = "2024"
+    strings:
+        $persist1 = "Startup" nocase ascii wide
+        $persist2 = "autorun" nocase ascii wide
+        $persist3 = "scheduled task" nocase ascii wide
+        $persist4 = "cron" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule Privilege_Escalation
+{
+    meta:
+        description = "Detects privilege escalation attempts"
+        author = "USB Security Guard"
+        date = "2024"
+    strings:
+        $priv1 = "RunAs" nocase ascii wide
+        $priv2 = "sudo" nocase ascii wide
+        $priv3 = "Administrator" nocase ascii wide
+        $priv4 = "SYSTEM" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule Credential_Theft
+{
+    meta:
+        description = "Detects credential theft patterns"
+        author = "USB Security Guard"
+        date = "2024"
+    strings:
+        $cred1 = "password" nocase ascii wide
+        $cred2 = "credential" nocase ascii wide
+        $cred3 = "ntlm" nocase ascii wide
+        $cred4 = "hash" nocase ascii wide
+    condition:
+        any of them
+}
+
+rule Data_Exfiltration
+{
+    meta:
+        description = "Detects data exfiltration patterns"
+        author = "USB Security Guard"
+        date = "2024"
+    strings:
+        $exfil1 = "send" nocase ascii wide
+        $exfil2 = "upload" nocase ascii wide
+        $exfil3 = "POST" nocase ascii wide
+        $exfil4 = "FTP" nocase ascii wide
+    condition:
+        any of them
+}
+
+// probe

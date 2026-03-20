@@ -1,7 +1,8 @@
-# src/yara_engine.py
-import os
-from datetime import datetime
 from pathlib import Path
+import os
+import hashlib
+import zipfile
+from threading import Event
 
 import yara
 
@@ -10,283 +11,396 @@ from src.logging_db import log_event
 from src.quarantine_manager import quarantine_file
 from src.scan_progress import progress_tracker
 from src.utils import notify_frontend
+from src.virustotal_client import lookup_file_hash
+from src.usb_security_db import get_db
 
-# Global variables
+
+# Rule locations supported by the scanner.
+MODULE_DIR = Path(__file__).resolve().parent
+LEGACY_RULES_FILE = MODULE_DIR / "yara_rules.yara"
+DEFAULT_RULES_DIR = MODULE_DIR.parent / "rules"
+
+# Shared scan state reused across scans. `rules` may stay None if loading fails.
 rules = None
-config = load_config()
-last_update_time = None
-loaded_rule_count = 0
-
-# Reasonable defaults (can be moved to config later)
-MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
-EXCLUDED_FOLDERS = {".git", "__pycache__", "node_modules", "$RECYCLE.BIN", "System Volume Information"}
-EXCLUDED_EXTENSIONS = {".lnk", ".url", ".tmp", ".bak"}
-ENCRYPTED_EXTENSIONS = {".enc", ".encrypted", ".aes", ".gpg", ".pgp", ".p7m", ".p7e"}
-SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+loaded_rule_files = []
+_stop_scan_event = Event()
 
 
-def _extract_match_strings(match) -> str:
-    """
-    Best-effort extraction of matched string bytes across yara-python versions.
-    Returns a comma-separated, decoded string and never raises.
-    """
-    values = []
-    for s in getattr(match, "strings", []) or []:
-        try:
-            # Legacy tuple format: (offset, identifier, data)
-            if isinstance(s, tuple) and len(s) >= 3:
-                data = s[2]
-                if isinstance(data, (bytes, bytearray)) and data:
-                    values.append(bytes(data).decode(errors="ignore"))
-                elif data:
-                    values.append(str(data))
-                continue
+def _discover_rule_files() -> list[Path]:
+    """Return all readable .yar/.yara files, preferring configured rules dir."""
+    config = load_config()
+    configured_dir = Path(config.get("yara_rules_dir") or DEFAULT_RULES_DIR)
+    candidates: list[Path] = []
 
-            data = getattr(s, "data", None)
-            if isinstance(data, (bytes, bytearray)) and data:
-                values.append(bytes(data).decode(errors="ignore"))
-                continue
-            if data:
-                values.append(str(data))
-                continue
+    if configured_dir.exists() and configured_dir.is_dir():
+        candidates.extend(sorted(configured_dir.glob("*.yar")))
+        candidates.extend(sorted(configured_dir.glob("*.yara")))
 
-            data = getattr(s, "matched_data", None)
-            if isinstance(data, (bytes, bytearray)) and data:
-                values.append(bytes(data).decode(errors="ignore"))
-                continue
-            if data:
-                values.append(str(data))
-                continue
+    # Backward-compatible fallback to the original single-file location.
+    if not candidates and LEGACY_RULES_FILE.exists():
+        candidates.append(LEGACY_RULES_FILE)
 
-            for inst in getattr(s, "instances", []) or []:
-                inst_data = getattr(inst, "matched_data", None)
-                if inst_data is None:
-                    inst_data = getattr(inst, "data", None)
-                if isinstance(inst_data, (bytes, bytearray)) and inst_data:
-                    values.append(bytes(inst_data).decode(errors="ignore"))
-                elif inst_data:
-                    values.append(str(inst_data))
-        except Exception:
+    # De-duplicate while preserving order.
+    seen = set()
+    unique = []
+    for p in candidates:
+        resolved = str(p.resolve())
+        if resolved in seen:
             continue
-    return ", ".join(v for v in values if v)
+        seen.add(resolved)
+        unique.append(p)
+    return unique
 
 
-def _normalize_severity(raw_value) -> str:
-    """Return one of: low, medium, high (defaults to medium)."""
-    value = str(raw_value or "").strip().lower()
-    return value if value in SEVERITY_RANK else "medium"
+def _compile_rules(rule_files: list[Path]):
+    """Build one compiled YARA object from all discovered rule files."""
+    filemap = {f"r{idx}": str(path) for idx, path in enumerate(rule_files)}
+    return yara.compile(filepaths=filemap)
 
 
-def _frontend_level_for_severity(severity: str) -> str:
-    """Map threat severity to frontend toast level."""
-    if severity == "high":
-        return "danger"
-    if severity == "medium":
-        return "warning"
-    return "info"
-
-
-def load_yara_rules():
+def load_yara_rules() -> dict:
     """
-    Compile all .yar / .yara files from the rules directory (including subfolders).
-    Returns dict with success status, message, and count for frontend.
+    Compile YARA rules and update module-level scan state.
+    Returns a structured result consumed by the frontend bridge.
     """
-    global rules, last_update_time, loaded_rule_count
+    global rules, loaded_rule_files
 
-    rules_dir = Path(config["yara_rules_dir"])
-    if not rules_dir.exists() or not rules_dir.is_dir():
-        msg = f"Rules directory not found: {rules_dir}"
-        log_event("YARA_ERROR", msg)
+    rule_files = _discover_rule_files()
+    if not rule_files:
         rules = None
-        loaded_rule_count = 0
-        return {"success": False, "message": msg, "count": 0, "last_update": None}
-
-    rule_files = {}
-    count = 0
-
-    for file_path in rules_dir.rglob("*.[yY][aA][rR]"):
-        if file_path.is_file():
-            namespace = str(file_path.relative_to(rules_dir).parent).replace(os.sep, "_")
-            if namespace == ".":
-                namespace = "root"
-            key = f"{namespace}_{file_path.stem}"
-            try:
-                rule_files[key] = file_path.read_text(encoding="utf-8")
-                count += 1
-            except Exception as e:
-                log_event("YARA_LOAD_ERROR", f"Failed to read {file_path.name}: {e}")
-
-    if count == 0:
-        msg = f"No YARA rules found in {rules_dir}"
-        log_event("YARA_WARNING", msg)
-        rules = None
-        loaded_rule_count = 0
-        return {"success": False, "message": msg, "count": 0, "last_update": None}
+        loaded_rule_files = []
+        msg = (
+            "No YARA rule files found. Expected .yar/.yara files in "
+            f"'{DEFAULT_RULES_DIR}' or legacy file '{LEGACY_RULES_FILE}'."
+        )
+        log_event("YARA_RULES_ERROR", msg)
+        return {"success": False, "count": 0, "error": msg, "files": []}
 
     try:
-        rules = yara.compile(sources=rule_files, includes=False)
-        last_update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        loaded_rule_count = count
-        log_event("YARA_LOADED", f"Successfully compiled {count} rules")
-        print(f"[YARA] Loaded {count} rules from {rules_dir}")
+        compiled = _compile_rules(rule_files)
+        rules = compiled
+        loaded_rule_files = [str(p) for p in rule_files]
+        log_event("YARA_RULES_RELOADED", f"Loaded {len(rule_files)} rule file(s)")
         return {
             "success": True,
-            "message": f"Successfully loaded {count} rules",
-            "count": count,
-            "last_update": last_update_time,
+            "count": len(rule_files),
+            "files": loaded_rule_files,
         }
-    except yara.SyntaxError as se:
-        msg = f"Syntax error in rules: {se}"
-        log_event("YARA_SYNTAX_ERROR", msg)
-        print(f"[YARA] Compile error: {se}")
+    except Exception as exc:
         rules = None
-        loaded_rule_count = 0
-        return {"success": False, "message": msg, "count": 0, "last_update": None}
-    except Exception as e:
-        msg = f"Unexpected compile error: {e}"
-        log_event("YARA_COMPILE_ERROR", msg)
-        print(f"[YARA] Unexpected error: {e}")
-        rules = None
-        loaded_rule_count = 0
-        return {"success": False, "message": msg, "count": 0, "last_update": None}
+        loaded_rule_files = []
+        log_event("YARA_RULES_ERROR", str(exc))
+        return {"success": False, "count": 0, "error": str(exc), "files": []}
 
 
-def reload_yara_rules():
-    """Exposed to frontend via Eel; reloads rules and returns status."""
-    return load_yara_rules()
+def get_yara_status() -> dict:
+    """Expose current rule-load state to the frontend."""
+    return {
+        "loaded": rules is not None,
+        "count": len(loaded_rule_files),
+        "files": list(loaded_rule_files),
+    }
 
 
-def should_scan_file(file_path: Path) -> bool:
-    """Quick filter to skip unwanted files/folders."""
-    try:
-        size_bytes = file_path.stat().st_size
-        if size_bytes > MAX_FILE_SIZE_BYTES:
-            log_event("SCAN_SKIP", f"File too large: {file_path} ({size_bytes / 1024 / 1024:.1f} MB)")
-            return False
-    except Exception:
-        return False
-
-    if file_path.suffix.lower() in EXCLUDED_EXTENSIONS:
-        return False
-
-    for part in file_path.parts:
-        if part in EXCLUDED_FOLDERS:
-            return False
-
+def request_scan_stop() -> bool:
+    """Signal the active scan loop to stop as soon as possible."""
+    _stop_scan_event.set()
     return True
 
 
+def clear_scan_stop_request() -> None:
+    _stop_scan_event.clear()
 
-def _is_encrypted_file(file_path: Path) -> bool:
-    """
-    Return True for files that are explicitly marked as encrypted via extension.
-    This enforces a quarantine policy independent of YARA matches.
-    """
-    return file_path.suffix.lower() in ENCRYPTED_EXTENSIONS
-def scan_drive(drive_letter: str):
-    """
-    Scan all files on the removable drive using loaded YARA rules.
-    Updates real-time progress and threat count.
-    """
-    if rules is None:
-        log_event("SCAN_ERROR", "Cannot scan - no valid YARA rules loaded")
-        progress_tracker.finish()
-        return
 
-    root = Path(f"{drive_letter}\\")
-    if not root.exists() or not root.is_dir():
-        log_event("SCAN_ERROR", f"Drive not accessible: {drive_letter}")
-        progress_tracker.finish()
-        return
-
-    log_event("SCAN_START", f"Starting scan on removable drive {drive_letter}")
-
-    all_files = []
+def _sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str | None:
+    """Hash a file for VirusTotal lookups without loading it all into memory."""
     try:
-        for path in root.rglob("*"):
-            if path.is_file() and should_scan_file(path):
-                all_files.append(path)
-    except Exception as e:
-        log_event("SCAN_DIR_ERROR", f"Error enumerating files on {drive_letter}: {e}")
-        progress_tracker.finish()
-        return
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
 
-    total_files = len(all_files)
-    if total_files == 0:
-        log_event("SCAN_FINISH", f"No eligible files found on {drive_letter}")
-        progress_tracker.finish()
-        return
 
-    progress_tracker.start_scan(drive_letter, total_files)
+def _read_file_window(path: str, size: int = 65536) -> bytes:
+    """Read a small prefix of a file for lightweight format detection."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(size)
+    except Exception:
+        return b""
 
-    found_threats = 0
-    scanned_count = 0
 
-    for file_path in all_files:
-        scanned_count += 1
-        rel_path = str(file_path.relative_to(root)) if file_path.is_relative_to(root) else str(file_path)
-        progress_tracker.update(rel_path, scanned_count)
+def _is_encrypted_pdf(path: str) -> bool:
+    header = _read_file_window(path)
+    return header.startswith(b"%PDF-") and b"/Encrypt" in header
 
-        try:
-            reasons = []
-            file_severity = "low"
 
-            if _is_encrypted_file(file_path):
-                reasons.append("Encrypted file policy [HIGH]")
-                file_severity = "high"
-
-            matches = rules.match(str(file_path))
-            if matches:
-                for match in matches:
-                    matched_strings = _extract_match_strings(match)
-                    match_severity = _normalize_severity(getattr(match, "meta", {}).get("severity"))
-                    if SEVERITY_RANK[match_severity] > SEVERITY_RANK[file_severity]:
-                        file_severity = match_severity
-
-                    reason = f"{match.rule} [{match_severity.upper()}]"
-                    if matched_strings:
-                        reason += f" - {matched_strings}"
-                    reasons.append(reason)
-
-            if reasons:
-                found_threats += 1
-                progress_tracker.add_threat()
-
-                reason_str = "; ".join(reasons)
-                quarantined_path = quarantine_file(file_path, reason_str)
-                if quarantined_path:
-                    log_event(
-                        "THREAT_FOUND",
-                        f"{file_path} -> {quarantined_path} [severity={file_severity}] ({reason_str})"
-                    )
-                else:
-                    log_event("THREAT_QUARANTINE_FAILED", f"{file_path} [severity={file_severity}] ({reason_str})")
-
-                try:
-                    notify_frontend(
-                        f"Threat Detected ({file_severity.upper()})",
-                        f"{file_path} - {reason_str}",
-                        level=_frontend_level_for_severity(file_severity),
-                    )
-                except Exception as e:
-                    log_event("NOTIFY_ERROR", f"Failed to notify frontend for threat: {e}")
-        except yara.Error as ye:
-            log_event("SCAN_FILE_YARA_ERROR", f"{file_path}: {ye}")
-        except Exception as e:
-            log_event("SCAN_FILE_ERROR", f"{file_path}: {e}")
-
-    log_event(
-        "SCAN_FINISH",
-        f"Scan completed on {drive_letter} - {found_threats} threats found, {scanned_count} files scanned",
+def _is_encrypted_office_file(path: str) -> bool:
+    header = _read_file_window(path, size=131072)
+    # Password-protected modern Office files are typically wrapped in an
+    # OLE container that contains these marker streams.
+    return (
+        header.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+        and b"EncryptedPackage" in header
+        and b"EncryptionInfo" in header
     )
 
+
+def _is_encrypted_zip(path: str) -> bool:
     try:
-        if found_threats > 0:
-            notify_frontend("Threats Found", f"{found_threats} threat(s) found on {drive_letter}", level="danger")
-        else:
-            notify_frontend("USB Safe", f"No threats found on {drive_letter}", level="success")
-    except Exception as ne:
-        log_event("NOTIFY_ERROR", f"Failed to send scan-completion notification: {ne}")
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                if info.flag_bits & 0x1:
+                    return True
+    except Exception:
+        return False
+    return False
 
-    progress_tracker.finish()
 
+def _detect_encrypted_file_reason(path: str) -> str | None:
+    """Identify common encrypted file formats that should be quarantined."""
+    suffix = Path(path).suffix.lower()
+    if suffix == ".pdf" and _is_encrypted_pdf(path):
+        return "Encrypted PDF blocked by policy"
+
+    if suffix in {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"} and _is_encrypted_office_file(path):
+        return "Encrypted Office file blocked by policy"
+
+    if suffix == ".zip" and _is_encrypted_zip(path):
+        return "Encrypted ZIP blocked by policy"
+
+    return None
+
+
+def _discover_drive_files(drive_letter: str) -> tuple[list[str], bool]:
+    """Build a stable file list so scan order and progress are predictable."""
+    discovered_files: list[str] = []
+
+    for root, dirs, files in os.walk(drive_letter):
+        if _stop_scan_event.is_set():
+            return discovered_files, True
+
+        dirs.sort(key=str.lower)
+        files.sort(key=str.lower)
+
+        for fname in files:
+            if _stop_scan_event.is_set():
+                return discovered_files, True
+            discovered_files.append(os.path.join(root, fname))
+
+    # Scan smaller files first so progress moves quickly at the start while
+    # preserving a deterministic tie-breaker for files with the same size.
+    def _file_sort_key(path: str) -> tuple[int, str]:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = float("inf")
+        return int(size), path.lower()
+
+    discovered_files.sort(key=_file_sort_key)
+    return discovered_files, False
+
+
+def scan_drive(drive_letter: str) -> None:
+    """Scan every file on a removable drive and quarantine anything suspicious."""
+    clear_scan_stop_request()
+    config = load_config()
+    if not config.get("enable_yara", True):
+        log_event("SCAN_SKIPPED", f"YARA disabled by config for {drive_letter}")
+        return
+
+    # Ensure rules are ready before walking the drive.
+    if rules is None:
+        result = load_yara_rules()
+        if not result.get("success"):
+            log_event(
+                "SCAN_FILE_YARA_ERROR",
+                result.get("error") or "YARA rules not loaded",
+            )
+            return
+
+    if not drive_letter.endswith(os.sep):
+        drive_letter += os.sep
+
+    scan_record_id = None
+    try:
+        scan_record_id = get_db().add_scan_record(drive_letter)
+    except Exception as exc:
+        log_event("SCAN_HISTORY_ERROR", f"Failed to add scan record: {exc}")
+
+    # Mark the scan active immediately so the UI responds as soon as the USB is inserted,
+    # even while we are still discovering and sorting the file list.
+    progress_tracker.start_scan(drive_letter, 0)
+    log_event("SCAN_START", f"Drive={drive_letter} files=discovering")
+
+    # VirusTotal checks are optional and intentionally capped per scan.
+    vt_enabled = bool(config.get("enable_virustotal_lookup", False))
+    vt_api_key = str(config.get("virustotal_api_key") or "").strip()
+    vt_timeout = float(config.get("virustotal_timeout_seconds", 4) or 4)
+    vt_max_lookups = int(config.get("virustotal_max_lookups_per_scan", 25) or 25)
+    vt_threshold = int(config.get("virustotal_malicious_threshold", 1) or 1)
+    vt_max_lookups = max(0, vt_max_lookups)
+    vt_threshold = max(1, vt_threshold)
+    vt_cache = {}
+    vt_lookup_count = 0
+
+    if vt_enabled and not vt_api_key:
+        log_event(
+            "VT_DISABLED",
+            "VirusTotal lookup enabled but API key is missing; skipping VT checks",
+        )
+
+    scan_stopped = False
+    files_scanned = 0
+    files_to_scan, stopped_during_discovery = _discover_drive_files(drive_letter)
+    total_files = len(files_to_scan)
+    progress_tracker.update("", files_scanned, total_files)
+    log_event("SCAN_DISCOVERED", f"Drive={drive_letter} files={total_files}")
+
+    if stopped_during_discovery:
+        scan_stopped = True
+        log_event("SCAN_STOPPED", f"Drive={drive_letter} requested_by=user during_discovery=true")
+        notify_frontend("Scan Stopped", f"Scan canceled for {drive_letter}", "warning")
+    try:
+        for path in files_to_scan:
+            # Stop requests are checked between files so cancellation stays responsive.
+            if _stop_scan_event.is_set():
+                scan_stopped = True
+                log_event("SCAN_STOPPED", f"Drive={drive_letter} requested_by=user")
+                notify_frontend("Scan Stopped", f"Scan canceled for {drive_letter}", "warning")
+                break
+
+            files_scanned += 1
+            progress_tracker.update(path, files_scanned, total_files)
+            try:
+                encrypted_reason = _detect_encrypted_file_reason(path)
+                if encrypted_reason:
+                    quarantined_to = quarantine_file(Path(path), encrypted_reason)
+                    if quarantined_to:
+                        progress_tracker.add_threat()
+                        log_event("ENCRYPTED_FILE_QUARANTINED", f"{path} -> {quarantined_to}")
+                        notify_frontend("Encrypted File Quarantined", f"{Path(path).name}", "warning")
+                    else:
+                        log_event("ENCRYPTED_FILE_QUARANTINE_ERROR", f"Failed to quarantine {path}")
+                    continue
+
+                # Policy enforcement: quarantine all ZIP archives immediately.
+                if Path(path).suffix.lower() == ".zip":
+                    quarantined_to = quarantine_file(Path(path), "ZIP blocked by policy")
+                    if quarantined_to:
+                        progress_tracker.add_threat()
+                        log_event("ZIP_QUARANTINED", f"{path} -> {quarantined_to}")
+                        notify_frontend("ZIP Quarantined", f"{path}", "warning")
+                    else:
+                        log_event("ZIP_QUARANTINE_ERROR", f"Failed to quarantine {path}")
+                    continue
+
+                # YARA is the primary local detection layer.
+                matches = rules.match(path, fast=True)
+                if matches:
+                    progress_tracker.add_threat()
+                    match_names = ", ".join(
+                        sorted({getattr(m, "rule", str(m)) for m in matches})
+                    )
+                    log_event("YARA_MATCH", f"{path} matched [{match_names}]")
+                    notify_frontend(
+                        "Threat Detected",
+                        f"{Path(path).name} matched YARA rule(s): {match_names}",
+                        "danger",
+                    )
+
+                    if config.get("auto_quarantine", True):
+                        quarantined_to = quarantine_file(Path(path), f"YARA match: {match_names}")
+                        if quarantined_to:
+                            log_event("YARA_QUARANTINED", f"{path} -> {quarantined_to} ({match_names})")
+                            notify_frontend("Threat Quarantined", f"{Path(path).name}", "warning")
+                        else:
+                            log_event("YARA_QUARANTINE_ERROR", f"Failed to quarantine {path} ({match_names})")
+                            notify_frontend("Quarantine Failed", f"{Path(path).name}", "danger")
+                    # File may have been moved to quarantine; skip further checks for this file.
+                    continue
+
+                # Safe first-pass VirusTotal integration:
+                # hash lookups only (never uploads), bounded per scan.
+                if not vt_enabled or not vt_api_key or vt_lookup_count >= vt_max_lookups:
+                    continue
+
+                file_hash = _sha256_file(path)
+                if not file_hash:
+                    continue
+
+                # Cache repeated hashes so duplicate files do not trigger extra lookups.
+                vt_result = vt_cache.get(file_hash)
+                if vt_result is None:
+                    vt_result = lookup_file_hash(file_hash, vt_api_key, vt_timeout)
+                    vt_cache[file_hash] = vt_result
+                    vt_lookup_count += 1
+
+                if not vt_result.get("ok"):
+                    status = vt_result.get("status")
+                    if status == "rate_limited":
+                        log_event(
+                            "VT_RATE_LIMITED",
+                            "VirusTotal rate limited requests; skipping remaining VT checks this scan",
+                        )
+                        vt_max_lookups = vt_lookup_count
+                    elif status in ("network_error", "http_error"):
+                        log_event("VT_LOOKUP_ERROR", f"{path} hash={file_hash} err={vt_result.get('error')}")
+                    continue
+
+                if vt_result.get("status") != "found":
+                    continue
+
+                malicious = int(vt_result.get("malicious") or 0)
+                suspicious = int(vt_result.get("suspicious") or 0)
+                if malicious < vt_threshold:
+                    continue
+
+                progress_tracker.add_threat()
+                log_event(
+                    "VT_MALICIOUS",
+                    (
+                        f"{path} hash={file_hash} malicious={malicious} "
+                        f"suspicious={suspicious} total={vt_result.get('total_engines', 0)}"
+                    ),
+                )
+
+                if config.get("auto_quarantine", True):
+                    quarantined_to = quarantine_file(Path(path), f"VirusTotal malicious={malicious}")
+                    if quarantined_to:
+                        log_event("VT_QUARANTINED", f"{path} -> {quarantined_to}")
+                        notify_frontend("Threat Quarantined", f"{path}", "warning")
+            except Exception as exc:
+                # Per-file failures are logged, but should not abort the full drive scan.
+                log_event("YARA_SCAN_ERROR", f"{path}: {exc}")
+    finally:
+        # Always close out progress and history records, even after cancellation/errors.
+        clear_scan_stop_request()
+        progress_tracker.finish()
+        status = progress_tracker.get_status()
+        event_name = "SCAN_STOPPED_COMPLETE" if scan_stopped else "SCAN_COMPLETE"
+        files_scanned = int(status.get("files_scanned", 0) or 0)
+        threats_found = int(status.get("threats_found", 0) or 0)
+        log_event(event_name, f"Drive={drive_letter} scanned={files_scanned} threats={threats_found}")
+
+        if scan_record_id is not None:
+            try:
+                final_status = "stopped" if scan_stopped else "completed"
+                get_db().update_scan_record(
+                    scan_record_id,
+                    files_scanned=files_scanned,
+                    threats_found=threats_found,
+                    status=final_status,
+                )
+            except Exception as exc:
+                log_event("SCAN_HISTORY_ERROR", f"Failed to update scan record {scan_record_id}: {exc}")
+
+
+# Eager load once so app startup reports rule issues early.
+load_yara_rules()

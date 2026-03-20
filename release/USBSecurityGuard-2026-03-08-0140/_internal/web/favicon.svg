@@ -1,0 +1,22 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="USB Security Guard icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0B3C6D"/>
+      <stop offset="100%" stop-color="#0F6B5C"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)"/>
+
+  <path d="M64 24 L96 38 V60 C96 82 81 101 64 108 C47 101 32 82 32 60 V38 Z"
+        fill="#E8F1F2"/>
+
+  <rect x="56" y="43" width="16" height="30" rx="4" fill="#0B3C6D"/>
+  <rect x="59" y="38" width="4" height="10" rx="1" fill="#0B3C6D"/>
+  <rect x="65" y="38" width="4" height="10" rx="1" fill="#0B3C6D"/>
+
+  <path d="M64 73 V86" stroke="#0B3C6D" stroke-width="6" stroke-linecap="round"/>
+  <path d="M64 86 L54 96" stroke="#0B3C6D" stroke-width="6" stroke-linecap="round"/>
+  <path d="M64 86 L74 96" stroke="#0B3C6D" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="64" cy="86" r="4" fill="#0B3C6D"/>
+</svg>

@@ -1,0 +1,56 @@
+﻿name: Build Windows App
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build app
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --name USBSecurityGuard --paths . --add-data "web;web" --add-data "rules;rules" --hidden-import plyer --hidden-import win11toast --hidden-import wmi --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32file --hidden-import win32com --hidden-import win32com.client main.py
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Compress-Archive -Path dist\USBSecurityGuard\* -DestinationPath release\USBSecurityGuard-windows-x64.zip -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: USBSecurityGuard-windows-x64
+          path: release/USBSecurityGuard-windows-x64.zip
+
+      - name: Publish release asset (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/USBSecurityGuard-windows-x64.zip
+          generate_release_notes: true
