@@ -1,8 +1,0 @@
-venv/
-logs/
-database/
-*.db
-auth.json
-config.json
-__pycache__/
-*.pyc
